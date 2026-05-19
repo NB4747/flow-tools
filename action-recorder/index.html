@@ -266,12 +266,14 @@
   <!-- ═══════════════════════════════════════════════════════════
      Recorder script source (embedded for bookmarklet generation)
      ═══════════════════════════════════════════════════════════ -->
+
   <script id="recorder-source" type="text/plain">/**
  * Web Action Recorder — Bookmarklet Script
  *
  * A self-contained, dependency-free DOM click recorder.
  * When injected into any page, it creates a Shadow DOM panel
- * that captures click events and resolves unique CSS selectors.
+ * that captures click events, resolves unique CSS selectors,
+ * replays recorded clicks, and exports automation scripts.
  *
  * Usage: paste into a bookmarklet, or use the companion index.html
  * to generate a draggable bookmarklet button.
@@ -283,9 +285,9 @@
   var CONTAINER_ID = '__war_container__';
   var existing = document.getElementById(CONTAINER_ID);
   if (existing && existing.shadowRoot) {
-    var panel = existing.shadowRoot.querySelector('.war-panel');
-    if (panel) {
-      panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    var existingPanel = existing.shadowRoot.querySelector('.war-panel');
+    if (existingPanel) {
+      existingPanel.style.display = existingPanel.style.display === 'none' ? 'flex' : 'none';
     }
     return;
   }
@@ -305,6 +307,11 @@
   var clickHandler = null;
   var toastTimer = null;
 
+  // Replay state
+  var isReplaying = false;
+  var replayAborted = false;
+  var replayTimers = [];
+
   /* ═══════════════════════════════════════════
      CSS.escape polyfill (for very old browsers)
      ═══════════════════════════════════════════ */
@@ -322,7 +329,6 @@
     if (el === document.body) return 'body';
     if (el === document.documentElement) return 'html';
 
-    // ID is the strongest signal — use it immediately
     if (el.id) {
       return '#' + cssEscape(el.id);
     }
@@ -333,13 +339,11 @@
     while (node && node.nodeType === 1 && node !== document.body && node !== document.documentElement) {
       var seg = node.tagName.toLowerCase();
 
-      // If this node has an id, use it as anchor & stop climbing
       if (node.id) {
         parts.unshift('#' + cssEscape(node.id));
         break;
       }
 
-      // Add up to 2 meaningful classes for human readability
       var classes = Array.from(node.classList).filter(function (c) {
         return c.length > 0 && !/^(ng-|_|js-|css-|svelte-)/i.test(c);
       }).slice(0, 2);
@@ -347,7 +351,6 @@
         seg += '.' + classes.map(cssEscape).join('.');
       }
 
-      // nth-child for unambiguous positioning
       var parent = node.parentElement;
       if (parent) {
         var siblings = Array.from(parent.children);
@@ -358,7 +361,6 @@
       parts.unshift(seg);
       node = node.parentElement;
 
-      // Early exit if the path is already unique on the page
       try {
         if (parts.length > 1 && document.querySelectorAll(parts.join(' > ')).length === 1) {
           break;
@@ -423,12 +425,12 @@
   /* ═══════════════════════════════════════════
      Show a transient toast message
      ═══════════════════════════════════════════ */
-  function showToast(shadow, msg) {
-    var toast = shadow.querySelector('.war-toast');
+  function showToast(shadowRoot, msg) {
+    var toast = shadowRoot.querySelector('.war-toast');
     if (!toast) {
       toast = document.createElement('div');
       toast.className = 'war-toast';
-      shadow.appendChild(toast);
+      shadowRoot.appendChild(toast);
     }
     toast.textContent = msg;
     toast.classList.add('war-show');
@@ -443,7 +445,6 @@
      ═══════════════════════════════════════════ */
   var container = document.createElement('div');
   container.id = CONTAINER_ID;
-  // container itself has no styles — everything lives in the shadow
 
   var shadow = container.attachShadow({ mode: 'open' });
 
@@ -453,9 +454,8 @@
     '*{margin:0;padding:0;box-sizing:border-box}',
     ':host{all:initial}',
 
-    /* ── Panel shell ── */
     '.war-panel{',
-      'position:fixed;bottom:20px;right:20px;width:370px;max-height:540px;',
+      'position:fixed;bottom:20px;right:20px;width:370px;max-height:560px;',
       'background:#1a1a2e;color:#e0e0e0;',
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
       'font-size:13px;line-height:1.4;',
@@ -471,7 +471,6 @@
     '.war-panel.war-minimized .war-status{display:none}',
     '.war-panel.war-minimized{max-height:none}',
 
-    /* ── Header ── */
     '.war-header{',
       'display:flex;align-items:center;gap:10px;',
       'padding:12px 16px;',
@@ -512,7 +511,6 @@
     '.war-btn:active{transform:scale(.93)}',
     '.war-btn-close:hover{background:#ff3b30!important;color:#fff!important}',
 
-    /* ── Status bar ── */
     '.war-status{',
       'padding:9px 16px;font-size:11px;',
       'display:flex;align-items:center;gap:8px;',
@@ -525,13 +523,13 @@
       'transition:background .25s,box-shadow .25s',
     '}',
     '.war-status-dot.war-paused{background:#ff9500;box-shadow:0 0 6px rgba(255,149,0,.5)}',
+    '.war-status-dot.war-replaying{background:#5e5ce6;box-shadow:0 0 6px rgba(94,92,230,.5)}',
     '.war-status-text{color:#888}',
     '.war-status-count{color:#555;margin-left:auto;font-variant-numeric:tabular-nums}',
 
-    /* ── Body / records list ── */
     '.war-body{',
       'flex:1;overflow-y:auto;padding:2px 0;',
-      'min-height:50px;max-height:300px',
+      'min-height:50px;max-height:260px',
     '}',
     '.war-body::-webkit-scrollbar{width:5px}',
     '.war-body::-webkit-scrollbar-track{background:transparent}',
@@ -570,26 +568,28 @@
     '}',
     '.war-record-copy:hover{color:#fff;background:rgba(255,255,255,.07)}',
 
-    /* ── Footer ── */
+    /* ── Footer with two rows ── */
     '.war-footer{',
-      'display:flex;gap:8px;padding:12px 16px;',
-      'border-top:1px solid rgba(255,255,255,.05);flex-shrink:0;flex-wrap:wrap',
+      'display:flex;flex-direction:column;gap:6px;',
+      'padding:10px 16px 12px;',
+      'border-top:1px solid rgba(255,255,255,.05);flex-shrink:0',
+    '}',
+    '.war-footer-row{',
+      'display:flex;gap:6px',
     '}',
 
     '.war-action{',
-      'flex:1;min-width:75px;padding:8px 12px;',
+      'flex:1;min-width:0;padding:7px 8px;',
       'border:1px solid rgba(255,255,255,.08);',
       'background:rgba(255,255,255,.03);color:#bbb;',
       'border-radius:8px;cursor:pointer;font-size:11px;font-weight:500;',
       'transition:all .15s;white-space:nowrap;text-align:center;',
-      'letter-spacing:.01em',
+      'letter-spacing:.01em;overflow:hidden;text-overflow:ellipsis',
     '}',
     '.war-action:hover{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.16)}',
-    '.war-action.war-primary{background:#ff3b30;border-color:#ff3b30;color:#fff;font-weight:600}',
-    '.war-action.war-primary:hover{background:#ff5e57;border-color:#ff5e57;box-shadow:0 4px 14px rgba(255,59,48,.35)}',
     '.war-action.war-paused{background:#ff9500;border-color:#ff9500;color:#fff}',
+    '.war-action.war-replay-active{background:#5e5ce6;border-color:#5e5ce6;color:#fff;font-weight:600}',
 
-    /* ── Toast ── */
     '.war-toast{',
       'position:fixed;bottom:90px;left:50%;transform:translateX(-50%);',
       'background:#2a2a3e;color:#fff;padding:8px 22px;border-radius:20px;',
@@ -621,9 +621,16 @@
       '<div class="war-empty">Click anywhere on the page to start recording</div>' +
     '</div>' +
     '<div class="war-footer">' +
-      '<button class="war-action" data-war-action="pause">⏸ Pause</button>' +
-      '<button class="war-action" data-war-action="copy-all">⎘ Copy All (JSON)</button>' +
-      '<button class="war-action" data-war-action="clear">✗ Clear</button>' +
+      '<div class="war-footer-row">' +
+        '<button class="war-action" data-war-action="pause">⏸ Pause</button>' +
+        '<button class="war-action" data-war-action="replay">▶ Play</button>' +
+        '<button class="war-action" data-war-action="clear">✗ Clear</button>' +
+      '</div>' +
+      '<div class="war-footer-row">' +
+        '<button class="war-action" data-war-action="copy-all">⎘ JSON</button>' +
+        '<button class="war-action" data-war-action="export-playwright">📄 Playwright</button>' +
+        '<button class="war-action" data-war-action="export-puppeteer">📄 Puppeteer</button>' +
+      '</div>' +
     '</div>';
 
   shadow.appendChild(panel);
@@ -668,7 +675,6 @@
       url: location.href,
       time: new Date().toISOString()
     });
-    // Keep memory bounded
     if (records.length > 300) {
       records = records.slice(-200);
     }
@@ -676,27 +682,263 @@
   }
 
   /* ═══════════════════════════════════════════
+     Update status bar (recording / paused / replaying)
+     ═══════════════════════════════════════════ */
+  function setStatus(state) {
+    var dot = shadow.querySelector('.war-status-dot');
+    var text = shadow.querySelector('.war-status-text');
+    dot.classList.remove('war-paused', 'war-replaying');
+    if (state === 'paused') {
+      dot.classList.add('war-paused');
+      text.textContent = 'Paused';
+    } else if (state === 'replaying') {
+      dot.classList.add('war-replaying');
+    } else {
+      text.textContent = 'Recording…';
+    }
+  }
+
+  /* ═══════════════════════════════════════════
+     Update play/stop button
+     ═══════════════════════════════════════════ */
+  var playBtn = shadow.querySelector('[data-war-action="replay"]');
+
+  function setPlayButtonState(state) {
+    if (state === 'replaying') {
+      playBtn.textContent = '⏹ Stop';
+      playBtn.classList.add('war-replay-active');
+    } else {
+      playBtn.textContent = '▶ Play';
+      playBtn.classList.remove('war-replay-active');
+    }
+  }
+
+  /* ═══════════════════════════════════════════
+     Clear all replay timers
+     ═══════════════════════════════════════════ */
+  function clearReplayTimers() {
+    for (var i = 0; i < replayTimers.length; i++) {
+      clearTimeout(replayTimers[i]);
+    }
+    replayTimers = [];
+  }
+
+  /* ═══════════════════════════════════════════
+     Delay helper (returns cancellable Promise)
+     ═══════════════════════════════════════════ */
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      var t = setTimeout(resolve, ms);
+      replayTimers.push(t);
+    });
+  }
+
+  /* ═══════════════════════════════════════════
+     Calculate step delay from record timestamps
+     ═══════════════════════════════════════════ */
+  function calcStepDelay(current, next) {
+    var t1 = new Date(current.time).getTime();
+    var t2 = new Date(next.time).getTime();
+    var diff = t2 - t1;
+    if (diff > 0 && diff < 5000) return diff;
+    return 800;
+  }
+
+  /* ═══════════════════════════════════════════
+     ══════════  REPLAY ENGINE  ══════════════
+     ═══════════════════════════════════════════ */
+  async function replay() {
+    if (records.length === 0) {
+      showToast(shadow, 'No records to replay');
+      return;
+    }
+
+    // Already replaying — stop
+    if (isReplaying) {
+      replayAborted = true;
+      clearReplayTimers();
+      isReplaying = false;
+      setPlayButtonState('idle');
+      setStatus('recording');
+      showToast(shadow, 'Replay stopped');
+      return;
+    }
+
+    isReplaying = true;
+    replayAborted = false;
+    setPlayButtonState('replaying');
+    setStatus('replaying');
+
+    var total = records.length;
+    var statusText = shadow.querySelector('.war-status-text');
+
+    for (var i = 0; i < total; i++) {
+      if (replayAborted) break;
+
+      var r = records[i];
+      statusText.textContent = 'Replaying (' + (i + 1) + '/' + total + ')…';
+
+      var el = document.querySelector(r.selector);
+
+      if (el) {
+        flash(el);
+
+        el.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: 0
+        }));
+
+        await delay(200);
+      } else {
+        showToast(shadow, 'Not found: ' + r.selector);
+      }
+
+      if (i < total - 1 && !replayAborted) {
+        var stepDelay = calcStepDelay(r, records[i + 1]);
+        await delay(stepDelay);
+      }
+    }
+
+    isReplaying = false;
+    clearReplayTimers();
+    setPlayButtonState('idle');
+    setStatus('recording');
+
+    if (!replayAborted) {
+      statusText.textContent = 'Recording…';
+      showToast(shadow, 'Replay complete (' + total + ' steps)');
+    }
+  }
+
+  /* ═══════════════════════════════════════════
+     ═══════  CODE GENERATORS  ═══════════════
+     ═══════════════════════════════════════════ */
+
+  function generateCommonHeader() {
+    return [
+      '/**',
+      ' * Auto-generated by Web Action Recorder',
+      ' * Source URL: ' + (records.length > 0 ? records[0].url : ''),
+      ' * Total steps: ' + records.length,
+      ' * Generated at: ' + new Date().toISOString(),
+      ' */',
+      ''
+    ].join('\n');
+  }
+
+  function generatePlaywright() {
+    if (records.length === 0) return '';
+
+    var lines = [generateCommonHeader()];
+    lines.push("const { chromium } = require('playwright');");
+    lines.push('');
+    lines.push('(async () => {');
+    lines.push('  const browser = await chromium.launch({ headless: false });');
+    lines.push('  const context = await browser.newContext();');
+    lines.push('  const page = await context.newPage();');
+    lines.push('');
+    lines.push("  // Navigate to the initial page");
+    lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
+    lines.push('  await page.waitForLoadState("domcontentloaded");');
+    lines.push('');
+
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
+      var safeSelector = r.selector.replace(/'/g, "\\'");
+
+      lines.push('  // Step ' + (i + 1) + ': ' + r.tag);
+      lines.push("  await page.locator('" + safeSelector + "').click();");
+      if (delayMs > 100) {
+        lines.push('  await page.waitForTimeout(' + delayMs + ');');
+      }
+      lines.push('');
+    }
+
+    lines.push('  await browser.close();');
+    lines.push('})();');
+
+    return lines.join('\n');
+  }
+
+  function generatePuppeteer() {
+    if (records.length === 0) return '';
+
+    var lines = [generateCommonHeader()];
+    lines.push("const puppeteer = require('puppeteer');");
+    lines.push('');
+    lines.push('(async () => {');
+    lines.push('  const browser = await puppeteer.launch({ headless: false });');
+    lines.push('  const page = await browser.newPage();');
+    lines.push('');
+    lines.push("  // Navigate to the initial page");
+    lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
+    lines.push('  await page.waitForSelector("body");');
+    lines.push('');
+
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
+      var safeSelector = r.selector.replace(/'/g, "\\'");
+
+      lines.push('  // Step ' + (i + 1) + ': ' + r.tag);
+      lines.push("  await page.waitForSelector('" + safeSelector + "', { timeout: 5000 });");
+      lines.push("  await page.click('" + safeSelector + "');");
+      if (delayMs > 100) {
+        lines.push('  await new Promise(r => setTimeout(r, ' + delayMs + '));');
+      }
+      lines.push('');
+    }
+
+    lines.push('  await browser.close();');
+    lines.push('})();');
+
+    return lines.join('\n');
+  }
+
+  function exportToPlaywright() {
+    if (records.length === 0) {
+      showToast(shadow, 'No records to export');
+      return;
+    }
+    var code = generatePlaywright();
+    copyToClipboard(code, function () {
+      showToast(shadow, 'Playwright script copied (' + records.length + ' steps)');
+    });
+  }
+
+  function exportToPuppeteer() {
+    if (records.length === 0) {
+      showToast(shadow, 'No records to export');
+      return;
+    }
+    var code = generatePuppeteer();
+    copyToClipboard(code, function () {
+      showToast(shadow, 'Puppeteer script copied (' + records.length + ' steps)');
+    });
+  }
+
+  /* ═══════════════════════════════════════════
      Global click handler
      ═══════════════════════════════════════════ */
   clickHandler = function (e) {
-    // Ignore clicks originating from our own panel
+    // Ignore clicks from our own panel
     if (container.contains(e.target)) return;
-    if (!isRecording) return;
+
+    // Don't record during replay or when paused
+    if (!isRecording || isReplaying) return;
 
     var el = e.target;
-    // Skip non-element targets (text nodes resolve to their parent via event)
     if (!el || el.nodeType !== 1) return;
 
-    // Visual feedback
     flash(el);
 
-    // Resolve selector
     var selector = getSelector(el);
 
-    // Persist
     addRecord(selector, el.tagName.toLowerCase());
 
-    // Prevent navigation so the user can keep recording
     var link = el.closest('a[href]');
     if (link && link.getAttribute('href') !== '#') {
       e.preventDefault();
@@ -713,21 +955,27 @@
   // Pause / Resume
   shadow.querySelector('[data-war-action="pause"]').addEventListener('click', function (e) {
     e.stopPropagation();
+    if (isReplaying) {
+      showToast(shadow, 'Stop replay first');
+      return;
+    }
     isRecording = !isRecording;
-    var dot = shadow.querySelector('.war-status-dot');
-    var statusText = shadow.querySelector('.war-status-text');
 
     if (isRecording) {
       this.textContent = '⏸ Pause';
       this.classList.remove('war-paused');
-      dot.classList.remove('war-paused');
-      statusText.textContent = 'Recording…';
+      setStatus('recording');
     } else {
       this.textContent = '▶ Resume';
       this.classList.add('war-paused');
-      dot.classList.add('war-paused');
-      statusText.textContent = 'Paused';
+      setStatus('paused');
     }
+  });
+
+  // Replay / Stop
+  playBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    replay();
   });
 
   // Copy all as JSON
@@ -743,9 +991,25 @@
     });
   });
 
+  // Export Playwright
+  shadow.querySelector('[data-war-action="export-playwright"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    exportToPlaywright();
+  });
+
+  // Export Puppeteer
+  shadow.querySelector('[data-war-action="export-puppeteer"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    exportToPuppeteer();
+  });
+
   // Clear all
   shadow.querySelector('[data-war-action="clear"]').addEventListener('click', function (e) {
     e.stopPropagation();
+    if (isReplaying) {
+      showToast(shadow, 'Stop replay first');
+      return;
+    }
     if (records.length === 0) return;
     records = [];
     renderRecords();
@@ -784,9 +1048,14 @@
     }
   });
 
-  // Close
+  // Close (with replay cleanup)
   shadow.querySelector('.war-btn-close').addEventListener('click', function (e) {
     e.stopPropagation();
+    if (isReplaying) {
+      replayAborted = true;
+      isReplaying = false;
+      clearReplayTimers();
+    }
     document.removeEventListener('click', clickHandler, true);
     container.remove();
   });
@@ -797,7 +1066,6 @@
   var dragHandle = shadow.querySelector('[data-war-drag]');
 
   dragHandle.addEventListener('pointerdown', function (e) {
-    // Don't initiate drag when clicking a button inside the header
     if (e.target.closest('button')) return;
     isDragging = true;
     var rect = panel.getBoundingClientRect();
@@ -817,7 +1085,6 @@
     var x = e.clientX - dragStartX;
     var y = e.clientY - dragStartY;
 
-    // Clamp within the viewport
     var pw = panel.offsetWidth;
     var ph = panel.offsetHeight;
     x = Math.max(0, Math.min(x, window.innerWidth - pw));
@@ -840,8 +1107,9 @@
   document.body.appendChild(container);
   renderRecords();
 
-})();</script>
+})();
 
+</script>
   <!-- ═══════════════════════════════════════════════════════════
      Main page logic
      ═══════════════════════════════════════════════════════════ -->
