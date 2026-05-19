@@ -1147,7 +1147,9 @@
         if (!/^\s*\(/.test(minified)) {
           minified = '(' + minified + ')()';
         }
-        return 'javascript:' + encodeURIComponent(minified);
+        // Don't encodeURIComponent — javascript: protocol runs code directly,
+        // and encoding breaks execution in some browsers' bookmark handling.
+        return 'javascript:' + minified;
       }
 
       /* ── Wire up the CTA button ── */
