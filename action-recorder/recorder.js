@@ -570,7 +570,7 @@
     lines.push('  const context = await browser.newContext();');
     lines.push('  const page = await context.newPage();');
     lines.push('');
-    lines.push("  // Navigate to the initial page");
+    lines.push("  \/\/ Navigate to the initial page");
     lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
     lines.push('  await page.waitForLoadState("domcontentloaded");');
     lines.push('');
@@ -580,7 +580,7 @@
       var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
       var safeSelector = r.selector.replace(/'/g, "\\'");
 
-      lines.push('  // Step ' + (i + 1) + ': ' + r.tag);
+      lines.push('  \/\/ Step ' + (i + 1) + ': ' + r.tag);
       lines.push("  await page.locator('" + safeSelector + "').click();");
       if (delayMs > 100) {
         lines.push('  await page.waitForTimeout(' + delayMs + ');');
@@ -604,7 +604,7 @@
     lines.push('  const browser = await puppeteer.launch({ headless: false });');
     lines.push('  const page = await browser.newPage();');
     lines.push('');
-    lines.push("  // Navigate to the initial page");
+    lines.push("  \/\/ Navigate to the initial page");
     lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
     lines.push('  await page.waitForSelector("body");');
     lines.push('');
@@ -614,7 +614,7 @@
       var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
       var safeSelector = r.selector.replace(/'/g, "\\'");
 
-      lines.push('  // Step ' + (i + 1) + ': ' + r.tag);
+      lines.push('  \/\/ Step ' + (i + 1) + ': ' + r.tag);
       lines.push("  await page.waitForSelector('" + safeSelector + "', { timeout: 5000 });");
       lines.push("  await page.click('" + safeSelector + "');");
       if (delayMs > 100) {

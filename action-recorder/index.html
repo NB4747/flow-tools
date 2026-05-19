@@ -839,9 +839,277 @@
     lines.push('  const context = await browser.newContext();');
     lines.push('  const page = await context.newPage();');
     lines.push('');
-    lines.push("  // Navigate to the initial page");
+    lines.push("  \/\/ Navigate to the initial page");
     lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
     lines.push('  await page.waitForLoadState("domcontentloaded");');
+    lines.push('');
+
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
+      var safeSelector = r.selector.replace(/'/g, "\\'");
+
+      lines.push('  \/\/ Step ' + (i + 1) + ': ' + r.tag);
+      lines.push("  await page.locator('" + safeSelector + "').click();");
+      if (delayMs > 100) {
+        lines.push('  await page.waitForTimeout(' + delayMs + ');');
+      }
+      lines.push('');
+    }
+
+    lines.push('  await browser.close();');
+    lines.push('})();');
+
+    return lines.join('\n');
+  }
+
+  function generatePuppeteer() {
+    if (records.length === 0) return '';
+
+    var lines = [generateCommonHeader()];
+    lines.push("const puppeteer = require('puppeteer');");
+    lines.push('');
+    lines.push('(async () => {');
+    lines.push('  const browser = await puppeteer.launch({ headless: false });');
+    lines.push('  const page = await browser.newPage();');
+    lines.push('');
+    lines.push("  \/\/ Navigate to the initial page");
+    lines.push("  await page.goto('" + records[0].url.replace(/'/g, "\\'") + "');");
+    lines.push('  await page.waitForSelector("body");');
+    lines.push('');
+
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var delayMs = (i < records.length - 1) ? calcStepDelay(r, records[i + 1]) : 800;
+      var safeSelector = r.selector.replace(/'/g, "\\'");
+
+      lines.push('  \/\/ Step ' + (i + 1) + ': ' + r.tag);
+      lines.push("  await page.waitForSelector('" + safeSelector + "', { timeout: 5000 });");
+      lines.push("  await page.click('" + safeSelector + "');");
+      if (delayMs > 100) {
+        lines.push('  await new Promise(r => setTimeout(r, ' + delayMs + '));');
+      }
+      lines.push('');
+    }
+
+    lines.push('  await browser.close();');
+    lines.push('})();');
+
+    return lines.join('\n');
+  }
+
+  function exportToPlaywright() {
+    if (records.length === 0) {
+      showToast(shadow, 'No records to export');
+      return;
+    }
+    var code = generatePlaywright();
+    copyToClipboard(code, function () {
+      showToast(shadow, 'Playwright script copied (' + records.length + ' steps)');
+    });
+  }
+
+  function exportToPuppeteer() {
+    if (records.length === 0) {
+      showToast(shadow, 'No records to export');
+      return;
+    }
+    var code = generatePuppeteer();
+    copyToClipboard(code, function () {
+      showToast(shadow, 'Puppeteer script copied (' + records.length + ' steps)');
+    });
+  }
+
+  /* ═══════════════════════════════════════════
+     Global click handler
+     ═══════════════════════════════════════════ */
+  clickHandler = function (e) {
+    // Ignore clicks from our own panel
+    if (container.contains(e.target)) return;
+
+    // Don't record during replay or when paused
+    if (!isRecording || isReplaying) return;
+
+    var el = e.target;
+    if (!el || el.nodeType !== 1) return;
+
+    flash(el);
+
+    var selector = getSelector(el);
+
+    addRecord(selector, el.tagName.toLowerCase());
+
+    var link = el.closest('a[href]');
+    if (link && link.getAttribute('href') !== '#') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
+  document.addEventListener('click', clickHandler, true);
+
+  /* ═══════════════════════════════════════════
+     Panel button event bindings
+     ═══════════════════════════════════════════ */
+
+  // Pause / Resume
+  shadow.querySelector('[data-war-action="pause"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (isReplaying) {
+      showToast(shadow, 'Stop replay first');
+      return;
+    }
+    isRecording = !isRecording;
+
+    if (isRecording) {
+      this.textContent = '⏸ Pause';
+      this.classList.remove('war-paused');
+      setStatus('recording');
+    } else {
+      this.textContent = '▶ Resume';
+      this.classList.add('war-paused');
+      setStatus('paused');
+    }
+  });
+
+  // Replay / Stop
+  playBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    replay();
+  });
+
+  // Copy all as JSON
+  shadow.querySelector('[data-war-action="copy-all"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (records.length === 0) {
+      showToast(shadow, 'No records to copy');
+      return;
+    }
+    var json = JSON.stringify(records, null, 2);
+    copyToClipboard(json, function () {
+      showToast(shadow, 'Copied ' + records.length + ' records as JSON');
+    });
+  });
+
+  // Export Playwright
+  shadow.querySelector('[data-war-action="export-playwright"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    exportToPlaywright();
+  });
+
+  // Export Puppeteer
+  shadow.querySelector('[data-war-action="export-puppeteer"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    exportToPuppeteer();
+  });
+
+  // Clear all
+  shadow.querySelector('[data-war-action="clear"]').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (isReplaying) {
+      showToast(shadow, 'Stop replay first');
+      return;
+    }
+    if (records.length === 0) return;
+    records = [];
+    renderRecords();
+    showToast(shadow, 'All records cleared');
+  });
+
+  // Individual record copy (event delegation on the body)
+  shadow.querySelector('.war-body').addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-war-copy]');
+    if (!btn) return;
+    e.stopPropagation();
+    var id = parseInt(btn.getAttribute('data-war-copy'), 10);
+    var record = null;
+    for (var i = records.length - 1; i >= 0; i--) {
+      if (records[i].id === id) { record = records[i]; break; }
+    }
+    if (record) {
+      copyToClipboard(record.selector, function () {
+        showToast(shadow, 'Copied selector');
+      });
+    }
+  });
+
+  // Minimize / Expand
+  shadow.querySelector('.war-btn-min').addEventListener('click', function (e) {
+    e.stopPropagation();
+    isMinimized = !isMinimized;
+    if (isMinimized) {
+      panel.classList.add('war-minimized');
+      this.textContent = '+';
+      this.title = 'Expand';
+    } else {
+      panel.classList.remove('war-minimized');
+      this.textContent = '−';
+      this.title = 'Minimize';
+    }
+  });
+
+  // Close (with replay cleanup)
+  shadow.querySelector('.war-btn-close').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (isReplaying) {
+      replayAborted = true;
+      isReplaying = false;
+      clearReplayTimers();
+    }
+    document.removeEventListener('click', clickHandler, true);
+    container.remove();
+  });
+
+  /* ═══════════════════════════════════════════
+     Drag-to-move (pointer events)
+     ═══════════════════════════════════════════ */
+  var dragHandle = shadow.querySelector('[data-war-drag]');
+
+  dragHandle.addEventListener('pointerdown', function (e) {
+    if (e.target.closest('button')) return;
+    isDragging = true;
+    var rect = panel.getBoundingClientRect();
+    dragStartX = e.clientX - rect.left;
+    dragStartY = e.clientY - rect.top;
+    panel.style.transition = 'none';
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    panel.style.left = rect.left + 'px';
+    panel.style.top = rect.top + 'px';
+    dragHandle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function (e) {
+    if (!isDragging) return;
+    var x = e.clientX - dragStartX;
+    var y = e.clientY - dragStartY;
+
+    var pw = panel.offsetWidth;
+    var ph = panel.offsetHeight;
+    x = Math.max(0, Math.min(x, window.innerWidth - pw));
+    y = Math.max(0, Math.min(y, window.innerHeight - ph));
+
+    panel.style.left = x + 'px';
+    panel.style.top = y + 'px';
+  });
+
+  document.addEventListener('pointerup', function () {
+    if (isDragging) {
+      isDragging = false;
+      panel.style.transition = 'transform .2s ease, opacity .2s ease, box-shadow .2s ease';
+    }
+  });
+
+  /* ═══════════════════════════════════════════
+     Inject into the page
+     ═══════════════════════════════════════════ */
+  document.body.appendChild(container);
+  renderRecords();
+
+})();
+
+</script>    lines.push('  await page.waitForLoadState("domcontentloaded");');
     lines.push('');
 
     for (var i = 0; i < records.length; i++) {
